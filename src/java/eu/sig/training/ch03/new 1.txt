@@ -1,0 +1,456 @@
+    //    El: "756ecf8a-01fc-ea11-a813-000d3ab57a42",
+    //    Gas: "429d38e6-3265-ea11-a811-000d3a6545ef"
+    //};
+    var SegmentedFilter = "";
+    var Form;
+    export function onLoad(executionContext: Xrm.ExecutionContext<any, any>) {
+        Form = <Form.nor_customer_request.Main.CustomerRequestEl>executionContext.getFormContext();
+
+        SetProductMainType();
+        //debugger;
+        if (Form.getAttribute("nor_order_date").getValue() == null)
+            setOrderDate();
+
+        // Attach onChange
+        Form.getAttribute("nor_address_abroad").addOnChange(toggleAddressAbroad);
+
+        // Select the right form on Change
+        Form.getAttribute("nor_product_main_type").addOnChange(RedirectFormBasedOnProductMainType);
+
+        // Select the right form on Load
+        CheckAndRedirectToForm();
+
+        // Default UI Actions
+        toggleAddressAbroad();
+
+        // following four calls will set correct customer type, which is used to PreFilterProductsLookup
+        Form.getAttribute("nor_cpr").addOnChange(function () { SetCustomerType("nor_cpr") });
+        Form.getAttribute("nor_cpr2").addOnChange(function () { SetCustomerType("nor_cpr2") });
+        Form.getAttribute("nor_cvr").addOnChange(function () { SetCustomerType("nor_cvr") });
+        Form.getAttribute("nor_pnumber").addOnChange(function () { SetCustomerType("nor_pnumber") });
+        Form.getAttribute("nor_customerid").addOnChange(function () { SetCustomerType("nor_customerid") });
+
+        // following will set correct customer type onload
+        PreFilterProductsLookup();
+        if (Form.getAttribute("nor_customerid").getValue() != null)
+            setCustomerTypeForLookup(Form.getAttribute("nor_customerid").getValue()[0].id.replace(/[{}]/g, ""), Form);
+
+        Form.getAttribute("nor_customerid").addOnChange(SetInstallationByCustomerId);
+        //Form.getAttribute("nor_customerid").addOnChange(function () { setCustomerTypeForLookup(Form.getAttribute("nor_customerid").getValue()[0].id.replace(/[{}]/g, ""), Form);});
+
+        Form.getAttribute("nor_installation").addOnChange(SetCustomerByInstallationId);
+        //##### SEGMENTED PRODUCTS ####
+        getSegmentedProducts();
+        Form.getAttribute("nor_customer_type").addOnChange(getSegmentedProducts);
+        Form.getAttribute("nor_customer_segment_type").addOnChange(getSegmentedProducts);
+        Form.getAttribute("nor_product_main_type").addOnChange(getSegmentedProducts);
+        Form.getControl("nor_product").addPreSearch(function () { FilterProductMainType(Form) })
+    }
+
+    export async function SetProductFromPricelist(Id) {
+
+        let product = Form.getAttribute("nor_product").getValue();
+
+        if (product != null) {
+
+            var confirmStrings = { text: "Overskriv eksisterende produkt?", title: "Overskriv" };
+            var confirmOptions = { height: 200, width: 450 };
+            await Xrm.Navigation.openConfirmDialog(confirmStrings, confirmOptions).then(
+                function (success) {
+                    if (success.confirmed) {
+                        SetProductFromSelectedRow();
+                    }
+                });
+        }
+        else {
+            SetProductFromSelectedRow();
+        }
+
+       
+    }
+
+    function SetProductFromSelectedRow() {
+        let rows = Form.getControl("gridPrices").getGrid().getSelectedRows().getAll();
+
+        let entity = rows[0].getData().getEntity();
+
+        let field = entity.attributes.getByName("nor_product_catalog_product_id");
+
+        let fieldValue = field.getValue()[0];
+
+        var lookupValue = new Array();
+        lookupValue[0] = new Object();
+        lookupValue[0].id = fieldValue.id;
+        lookupValue[0].name = fieldValue.name;
+        lookupValue[0].entityType = "nor_product_catalog_product"; //Entity Type of the lookup entity
+
+        Form.getAttribute("nor_product").setValue(lookupValue);
+    }
+
+    // Following will set and remove customer upon selecting an instllation
+    async function SetCustomerByInstallationId() {
+
+        let installationIdField = Form.getAttribute("nor_installation").getValue();
+
+        if (installationIdField) {
+            let installaionId = installationIdField[0].id.replace("{", "").replace("}", "");
+
+            let installationResult = XrmQuery.retrieve(x => x.nor_installations, installaionId).executeSync() as any;
+
+
+            if (installationResult != null) {
+                if (installationResult.nor_customer_guid == null) {
+                    clearNotifications();
+                    Form.ui.setFormNotification("Valgte installation har ikke en kunde tilknyttet", "INFO", "1");
+                }
+                else { //Fetch customer as we need customer name to set reference correctly.
+                    let customerResult = await XrmQuery.retrieve(x => x.accounts, installationResult.nor_customer_guid).executeSync() as any;
+
+                    var lookupValue = new Array();
+                    lookupValue[0] = new Object();
+                    lookupValue[0].id = installationResult.nor_customer_guid;
+                    lookupValue[0].name = customerResult.name;
+                    lookupValue[0].entityType = "account";
+
+                    Form.getAttribute("nor_customerid").setValue(lookupValue);
+
+                    if (customerResult.customertypecode == 181870001 || customerResult.customertypecode == 181870003) {
+                        Form.getAttribute("nor_customer_type").setValue(nor_customer_type.Private);
+                        Form.getControl("nor_product").setDisabled(false); // Set to editable as customer type is set
+                    }
+                    else if (customerResult.customertypecode == 181870000 || customerResult.customertypecode == 181870002) {
+                        Form.getAttribute("nor_customer_type").setValue(nor_customer_type.Business);
+                        Form.getControl("nor_product").setDisabled(false); // Set to editable as customer type is set
+                    }
+                }
+            }
+        }
+        else {
+            // installation is removed from customer request and referencing customer is to be removed as well.
+            //Form.getAttribute("nor_customerid").setValue(null);
+            clearNotifications();
+        }
+    }
+
+
+    async function SetInstallationByCustomerId() {
+        let customerIdField = Form.getAttribute("nor_customerid").getValue();
+
+        if (customerIdField) {
+            let customerId = customerIdField[0].id.replace("{", "").replace("}", "");
+
+            let query = await XrmQuery.retrieveMultiple(x => x.nor_installation_consummers).filter(x => Filter.equals(x.nor_customer_guid, Filter.makeGuid(customerId))).andFilter(x=>  Filter.equals(x.statecode, nor_installation_consummer_statecode.Active)).select(y => [y.nor_installation_guid, y.nor_name]).promise();
+
+            // only if we found one. 
+            if (query.length == 1) {
+                var lookupValue = new Array();
+                lookupValue[0] = new Object();
+                lookupValue[0].id = query[0].nor_installation_guid;
+                //@ts-ignore
+                lookupValue[0].name = query[0].nor_installation.nor_name != null ? query[0].nor_name : "Installation";
+                lookupValue[0].entityType = "nor_installation"; //Entity Type of the lookup entity
+
+                Form.getAttribute("nor_installation").setValue(lookupValue);
+            }
+        }
+    }
+
+
+    function setOrderDate() {
+        Form.getAttribute("nor_order_date").setValue(Form.getAttribute("createdon").getValue());
+        // Form.data.entity.save();
+    }
+
+    function toggleAddressAbroad() {
+        let addressAbroad = Form.getAttribute("nor_address_abroad").getValue();
+
+        let disableEntityReferenceAddressField = false;
+        let disableAddressFields = true;
+
+        if (addressAbroad) {
+            disableEntityReferenceAddressField = true;
+            disableAddressFields = false;
+        }
+        else {
+            Form.getAttribute("nor_address_abroad").setValue(false);
+            disableEntityReferenceAddressField = false;
+            disableAddressFields = true;
+        }
+
+        Form.getControl("nor_kvhx_customer_address").setDisabled(disableEntityReferenceAddressField);
+        Form.getControl("nor_customer_postal_code").setDisabled(disableAddressFields);
+        Form.getControl("nor_customer_street").setDisabled(disableAddressFields);
+        Form.getControl("nor_customer_letter").setDisabled(disableAddressFields);
+        Form.getControl("nor_customer_side_door").setDisabled(disableAddressFields);
+        Form.getControl("nor_customer_place").setDisabled(disableAddressFields);
+        Form.getControl("nor_customer_city").setDisabled(disableAddressFields);
+        Form.getControl("nor_customer_house_no").setDisabled(disableAddressFields);
+        Form.getControl("nor_customer_floor").setDisabled(disableAddressFields);
+        Form.getControl("nor_customer_streetcode").setDisabled(disableAddressFields);
+        Form.getControl("nor_customer_municipality_code").setDisabled(disableAddressFields);
+    }
+
+
+    // Sets the product main type, but only on create
+    function SetProductMainType() {
+
+        if (Form.ui.getFormType() === Xrm.FormType.Create) {
+
+            var currentForm = Form.ui.formSelector.getCurrentItem().getId().toLowerCase();
+
+            var lookupValue = new Array();
+            lookupValue[0] = new Object();
+            lookupValue[0].id = currentForm != dg.globals.CustomerRequestForm.El ? "{429d38e6-3265-ea11-a811-000d3a6545ef}" : "{756ecf8a-01fc-ea11-a813-000d3ab57a42}"; // GUID of the lookup id
+            lookupValue[0].name = currentForm != dg.globals.CustomerRequestForm.El ? "Gas" : "El";
+            lookupValue[0].entityType = "nor_product_main_type"; //Entity Type of the lookup entity
+
+            Form.getAttribute("nor_product_main_type").setValue(lookupValue);
+        }
+    }
+
+    function RedirectFormBasedOnProductMainType() {
+
+        if (Form.getAttribute("nor_product_main_type").getValue() == null)
+            return;
+
+        if (Form.ui.getFormType() === Xrm.FormType.Create) {
+
+            var currentForm = Form.ui.formSelector.getCurrentItem().getId().toLowerCase();
+            var productMainType = Form.getAttribute("nor_product_main_type").getValue();
+
+            if (productMainType[0].id.replace("{", "").replace("}", "") === dg.globals.ProductMainType.el.toUpperCase() &&
+                currentForm != dg.globals.CustomerRequestForm.El) {
+
+                Form.getAttribute("nor_name").setRequiredLevel("none");
+                var attributes = Form.data.entity.attributes.get();
+                for (var i in attributes) {
+                    attributes[i].setSubmitMode("never");
+                }
+            }
+            else if (productMainType[0].id.replace("{", "").replace("}", "") === dg.globals.ProductMainType.gas.toUpperCase() &&
+                currentForm != dg.globals.CustomerRequestForm.Gas) {
+
+                Form.getAttribute("nor_name").setRequiredLevel("none");
+                var attributes = Form.data.entity.attributes.get();
+                for (var i in attributes) {
+                    attributes[i].setSubmitMode("never");
+                }
+            }
+        }
+
+        CheckAndRedirectToForm();
+    }
+
+    export function CheckAndRedirectToForm() {
+        var currentForm = Form.ui.formSelector.getCurrentItem().getId().toLowerCase()
+        var productMainType = Form.getAttribute("nor_product_main_type").getValue();
+
+        if (productMainType == null) // productMainType will be null onload of create form 
+            return;
+
+        if (productMainType[0].id.replace("{", "").replace("}", "") === dg.globals.ProductMainType.el.toUpperCase() &&
+            currentForm != dg.globals.CustomerRequestForm.El)
+            redirectToForm(dg.globals.CustomerRequestForm.El);
+
+        else if (productMainType[0].id.replace("{", "").replace("}", "") === dg.globals.ProductMainType.gas.toUpperCase() &&
+            currentForm != dg.globals.CustomerRequestForm.Gas)
+            redirectToForm(dg.globals.CustomerRequestForm.Gas);
+    }
+
+    export function redirectToForm(formid: string) {
+        var availableForms = Form.ui.formSelector.items.get();
+        for (var i in availableForms) {
+            var form = availableForms[i];
+            if (form.getId().toLowerCase() == formid.toLowerCase()) {
+                form.navigate();
+            }
+        }
+    }
+
+    function SetCustomerType(fieldName: string) {
+        let cpr_Cvr_Field: any = Form.getAttribute(fieldName);
+        let cpr_Cvr_Field_Value = cpr_Cvr_Field.getValue();
+        if (cpr_Cvr_Field_Value != null) {
+            if (cpr_Cvr_Field._attributeName == "nor_customerid") {
+                setCustomerTypeForLookup(cpr_Cvr_Field_Value[0].id.replace(/[{}]/g, ""), Form)
+            }
+            else if (cpr_Cvr_Field._attributeName == "nor_cpr" || cpr_Cvr_Field._attributeName == "nor_cpr2") {
+                Form.getAttribute("nor_customer_type").setValue(nor_customer_type.Private);
+                Form.getControl("nor_product").setDisabled(false); // Set Product to editable as customer type is set
+            }
+
+            else if (cpr_Cvr_Field._attributeName == "nor_cvr" || cpr_Cvr_Field._attributeName == "nor_pnumber") {
+                Form.getAttribute("nor_customer_type").setValue(nor_customer_type.Business);
+                Form.getControl("nor_product").setDisabled(false); // Set to editable as customer type is set
+            }
+            else {
+                Form.getAttribute("nor_customer_type").setValue(null);
+                Form.getControl("nor_product").setDisabled(true); // Set to readonly until customer type is not set
+                Form.ui.setFormNotification("Vælg kunde eller angive cpr eller cvr for at se relevante produkter", "INFO", "1");
+            }
+        }
+        else {
+            Form.getAttribute("nor_customer_type").setValue(null);
+            Form.getControl("nor_product").setDisabled(true); // Set to readonly until customer type is not set
+            Form.ui.setFormNotification("Vælg kunde eller angive cpr eller cvr for at se relevante produkter", "INFO", "1");
+        }
+    }
+
+    export function PreFilterProductsLookup() {
+        var productMainType = Form.getAttribute("nor_product_main_type").getValue();
+        if (productMainType == null) // productMainType will be null onload of create form 
+            return;
+
+        var customerType = Form.getAttribute("nor_customer_type").getValue();
+        if (customerType != null) {
+            Form.getControl("nor_product").setDisabled(false); // Set to editable as customer type is set now
+
+            if (productMainType[0].id.replace("{", "").replace("}", "") === dg.globals.ProductMainType.el.toUpperCase()) {
+                if (customerType == nor_customer_type.Business)
+                    Form.getControl("nor_product").setDefaultView("{1E76AFD8-1A74-EA11-A811-000D3AB57A42}"); // Business products
+                else
+                    Form.getControl("nor_product").setDefaultView("{40C6CBEF-3923-EB11-A813-000D3A6545EF}"); // Private products
+            }
+            else if (productMainType[0].id.replace("{", "").replace("}", "") === dg.globals.ProductMainType.gas.toUpperCase()) {
+                if (customerType == nor_customer_type.Business)
+                    Form.getControl("nor_product").setDefaultView("{020b708a-fe2f-eb11-a813-000d3adbf707}"); // Business products
+                else
+                    Form.getControl("nor_product").setDefaultView("{7094A819-3A23-EB11-A813-000D3A6545EF}"); // Private products
+            }
+        }
+        else {
+            Form.getControl("nor_product").setDisabled(true); // Set to readonly until customer type is no set
+            Form.ui.setFormNotification("Vælg kunde eller angive cpr eller cvr for at se relevante produkter", "INFO", "1");
+        }
+    }
+
+
+    function clearNotifications() {
+        Form.ui.clearFormNotification("1");
+        Form.ui.clearFormNotification("ERRORduplicate");
+        Form.ui.clearFormNotification("ERRORtaken");
+    }
+
+    //Segmantation of product
+
+    export async function getSegmentedProducts() {
+        //Reset filter
+        //debugger;
+        SegmentedFilter = "";
+        let _segmentCode = Form.getAttribute("nor_customer_segment_type").getValue();
+        let _customerCode = Form.getAttribute("nor_customer_type").getValue();
+        let _mainProductId = "";
+        if (Form.getAttribute("nor_product_main_type").getValue() != null)
+            _mainProductId = Form.getAttribute("nor_product_main_type").getValue()[0].id;
+
+        if (_customerCode == null)
+            return null;
+        else if (_customerCode == nor_customer_type.Private && (_customerCode == null || _mainProductId == null))
+            return null;
+        else if (_customerCode == nor_customer_type.Business && (_segmentCode == null || _customerCode == null || _mainProductId == null))
+            return null;
+
+        let _select = "?$select=nor_name,nor_valid_to,nor_valid_from,nor_time_limit_number_of_months,_nor_product_typeid_value,modifiedon,nor_customer_type,nor_product_catalog_productid";
+
+        let filter = "";
+        if (_customerCode == nor_customer_type.Business)
+            filter = "&$filter=nor_customer_type eq " + _customerCode + " and _nor_product_main_type_value eq " + _mainProductId + " and (nor_nor_product_catalog_product_nor_segment/any(o1:(o1/nor_type eq " + _segmentCode + ")))";
+        else if (_customerCode == nor_customer_type.Private)
+            filter = "&$filter=nor_customer_type eq " + _customerCode + " and _nor_product_main_type_value eq " + _mainProductId;
+        var query = _select + filter;
+
+        let entityName = "nor_product_catalog_product";
+
+        Xrm.WebApi.retrieveMultipleRecords(entityName, query).then
+            (async function (results) {
+                //debugger;
+
+                if (results.entities.length > 0) {
+                    var FilterValues = "";
+                    for (var i = 0; i < results.entities.length; i++) {
+                        var InCondition = "<condition attribute='nor_product_catalog_productid' operator='eq' value='" + results.entities[i].nor_product_catalog_productid + "'/>"
+
+                        FilterValues += InCondition;
+                    }
+                    //        <value uiname="Basic" uitype="nor_product_catalog_product">{58841A3B-FD0D-EB11-A813-000D3AB57A42}</value>
+                    var fetchXml = [
+                        '<filter type="or">',
+                        //'<condition attribute="nor_product_catalog_productid" operator="in">',
+                        FilterValues/*.replace(/[{}]/g, "")*/,
+                        //'</condition>',
+                        '</filter>'
+                    ].join("");
+
+                    //debugger;
+                    SegmentedFilter = fetchXml.trim();
+                }
+                else
+                    SegmentedFilter = "";
+            });
+    }
+    export async function FilterProductMainType(form: any) {
+        var Filter = SegmentedFilter;
+        console.log(Filter);
+        if (Filter != "") {
+            form.getControl("nor_product").addCustomFilter(Filter, "nor_product_catalog_product");
+        }
+        else {
+            let view = await getView("No Products") as Array<XDT.SavedQuery>;
+            //debugger;
+            form.getControl("nor_product").setDefaultView(view[0].savedqueryid as string);
+        }
+    }
+
+    async function getView(name: string) {
+        return XrmQuery.retrieveMultiple(x => x.savedqueries)
+            .andFilter(f => Filter.equals(f.name, name)).select(x => [x.savedqueryid])
+            .promise();
+    }
+    export function setCustomerTypeForLookup(customerId: string, form: any) {
+        if (customerId == null)
+            return;
+
+        Xrm.WebApi.retrieveRecord("account", customerId).then(
+            function success(result) {
+                if (result.customertypecode != null) {
+                    if (result.customertypecode == account_customertypecode.Business || result.customertypecode == account_customertypecode.Businesslead) {
+                        {
+                            form.getAttribute("nor_customer_type").setValue(nor_customer_type.Business);
+                            form.getAttribute("nor_customer_type").fireOnChange();
+                            Form.getControl("nor_product").setDisabled(false);
+                            //handle Customersegment
+                            if (result.nor_potential_segment != null) {
+                                form.getAttribute("nor_customer_segment_type").setValue(result.nor_potential_segment);
+                                form.getAttribute("nor_customer_segment_type").fireOnChange();
+                            }
+                            else if (result.nor_potential_segment === null && result._nor_sonwin_segmentid_value != null) {
+                                let strippedSegmentid = result._nor_sonwin_segmentid_value.replace(/[{}]/g, "").toLowerCase();
+                                Xrm.WebApi.retrieveRecord("nor_segment", strippedSegmentid).then(
+                                    function success(result) {
+                                        debugger;
+                                        let currentsegment = form.getAttribute("nor_customer_segment_type").getValue();
+                                        if (result.nor_type != null && currentsegment != result.nor_type) {
+                                            form.getAttribute("nor_customer_segment_type").setValue(result.nor_type);
+                                            form.getAttribute("nor_customer_segment_type").fireOnChange();
+                                        }
+                                    },
+                                );
+                            }
+                            //form.getControl("nor_product_category_product").setDefaultView("{1E76AFD8-1A74-EA11-A811-000D3AB57A42}"); // Business products
+                        }
+                    }
+                    else if (result.customertypecode == account_customertypecode.Private || result.customertypecode == account_customertypecode.Privatelead) {
+                        form.getAttribute("nor_customer_type").setValue(nor_customer_type.Private);
+                        Form.getControl("nor_product").setDisabled(false);
+                        form.getAttribute("nor_customer_type").fireOnChange();
+                        form.getControl("nor_product_category_product").setDefaultView("{40C6CBEF-3923-EB11-A813-000D3A6545EF}"); // Private products
+                    }
+
+                    clearNotifications();
+                    PreFilterProductsLookup();
+                }
+            },
+        );
+    }
+}
+    
