@@ -5,7 +5,6 @@ import java.util.List;
 
 public class BoardPanel {
     @SuppressWarnings("unused")
-    // tag::render[]
     /**
      * Renders a single square on the given graphics context on the specified
      * rectangle.
@@ -29,7 +28,6 @@ public class BoardPanel {
             unit.getSprite().draw(g, x, y, w, h);
         }
     }
-    // end::render[]
 
     private class Sprite {
         @SuppressWarnings("unused")
